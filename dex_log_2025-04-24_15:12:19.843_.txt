@@ -1,0 +1,25 @@
+=== DEX Logger Started ===
+Timestamp: 2025-04-24 15:12:19.843 
+Log File: /Users/hx4220/Projects/vending_machine/build/logs/dex_log_2025-04-24_15:12:19.843_.txt
+========================
+
+2025-04-24 15:12:19.843 [SYSTEM] Data logger started successfully
+2025-04-24 15:12:24.074 [RX]  HEX: a7 f3  ASCII: ..
+2025-04-24 15:12:24.074 [SYSTEM] WARNING: Received unexpected data while waiting for first ENQ
+2025-04-24 15:12:24.172 [RX]  HEX: 05  ASCII: .
+2025-04-24 15:12:24.172 [SYSTEM] Received first ENQ, attempting to send DLE+ACK0
+2025-04-24 15:12:24.172 [TX]  HEX: 10 30  ASCII: .0
+2025-04-24 15:12:24.228 [SYSTEM] State transition to WAITING_FOR_ACK_RESPONSE (Waiting for VMC Comm ID / EOT)
+2025-04-24 15:12:24.240 [RX]  HEX: 10 01 43 4e 56 20 20 20 44 45 33 32 53 52 30 31 4c 30 31 10 03 75 9b  ASCII: ..CNV   DE32SR01L01..u.
+2025-04-24 15:12:24.240 [SYSTEM] DEBUG: Frame analysis - length: 23, first byte: 10, second byte: 1, third-to-last: 3, second-to-last: 75, last byte: 9b
+2025-04-24 15:12:24.240 [SYSTEM] Received potential VMC Comm ID response.
+2025-04-24 15:12:24.240 [SYSTEM] Frame check result: PASS
+2025-04-24 15:12:24.240 [SYSTEM] CRC Comparison - Received: 0x9b75, Calculated: 0x9638
+2025-04-24 15:12:24.241 [SYSTEM] ERROR: CRC check failed for VMC Comm ID response.
+2025-04-24 15:12:24.241 [SYSTEM] State transition to FAILED (First handshake CRC error)
+2025-04-24 15:12:25.204 [RX]  HEX: 05  ASCII: .
+2025-04-24 15:12:26.197 [RX]  HEX: 05  ASCII: .
+2025-04-24 15:12:27.199 [RX]  HEX: 05  ASCII: .
+2025-04-24 15:12:28.199 [RX]  HEX: 05  ASCII: .
+2025-04-24 15:12:29.201 [RX]  HEX: 05  ASCII: .
+2025-04-24 15:12:30.201 [RX]  HEX: 05  ASCII: .
