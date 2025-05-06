@@ -125,7 +125,7 @@ def byte_pair_swap(data):
         result.append(data[-1])
     return bytes(result)
 
-def analyze_frame_crc(full_frame_hex, show_all=False):
+def analyze_frame_crc(full_frame_hex, show_all=True): # always show all = True
     original_frame_bytes = bytes.fromhex(full_frame_hex.replace(" ", ""))
 
     if len(original_frame_bytes) < 3:
@@ -140,12 +140,13 @@ def analyze_frame_crc(full_frame_hex, show_all=False):
     all_found_matches = []
     
     # Header for overall results
+    # Adjusted column widths slightly
+    header_format = "{:<25} {:<12} {:<12} {:<23} {:<6} {:<7} {:<7} {:<7} {:<7} {:<10} {:<8}"
     if show_all:
-        print("{:<25} {:<12} {:<12} {:<25} {:<6} {:<7} {:<7} {:<7} {:<7} {:<10} {:<8}".format(
+        print(header_format.format(
             "Algorithm", "Frame Type", "CRC Loc", "Data Bytes Used", "Init", "Poly", "RefIn", "RefOut", "XOROut", "Result", "Matches"
         ))
-        print("-" * 130)
-
+        print("-" * 128) # Adjusted separator length
 
     for frame_label, current_frame_bytes in frame_endian_variations:
         print(f"\n=== Testing Frame: {frame_label} ({' '.join(f'{b:02x}' for b in current_frame_bytes)}) ===")
@@ -157,7 +158,6 @@ def analyze_frame_crc(full_frame_hex, show_all=False):
 
         for crc_loc_label, data_for_crc, extracted_crc_bytes in crc_location_variations:
             if not data_for_crc or not extracted_crc_bytes or len(extracted_crc_bytes) != 2:
-                # print(f"Skipping invalid data/CRC split for {crc_loc_label}")
                 continue
 
             target_crc_be = (extracted_crc_bytes[0] << 8) | extracted_crc_bytes[1]
@@ -191,36 +191,50 @@ def analyze_frame_crc(full_frame_hex, show_all=False):
                     if calculated_crc == target_crc_be: match_type = "BE"
                     elif calculated_crc == target_crc_le: match_type = "LE"
                     
-                    # Store and print if match or show_all
                     if match_type or show_all:
-                        print("{:<25} {:<12} {:<12} {:<25} 0x{:04x} 0x{:04x} {:<7} {:<7} 0x{:04x} 0x{:04x}   {:<8}".format(
-                            algo_params['name'], frame_label[:10], crc_loc_label[:10], data_label[:23], 
-                            algo_params['init'], algo_params['normal_poly'], 
-                            str(algo_params['ref_in']), str(algo_params['ref_out']), algo_params['xor_out'],
-                            calculated_crc, match_type if match_type else ""
+                        print(header_format.format(
+                            algo_params['name'], frame_label[:10], crc_loc_label[:10], data_label[:21], 
+                            f"0x{algo_params['init']:04x}", f"0x{algo_params['normal_poly']:04x}", 
+                            str(algo_params['ref_in']), str(algo_params['ref_out']), f"0x{algo_params['xor_out']:04x}",
+                            f"0x{calculated_crc:04x}", match_type if match_type else ""
                         ))
                     if match_type:
                         all_found_matches.append({**algo_params, "frame_label":frame_label, "crc_loc_label": crc_loc_label, "data_label":data_label, "calculated_crc": calculated_crc, "matched_target": match_type})
                 
                 # Test Custom DEX Algorithm
-                # (Reflect In/Out and XOR are not typically part of its definition, but can be experimented with if needed by wrapping)
-                dex_init_values = [0x0000, 0xFFFF] # Common initial values to try
+                dex_init_values = [0x0000, 0xFFFF] 
+                final_xor_for_dex = 0x0D4D # XOR difference (0x9B75 ^ 0x9638)
+
                 for dex_init in dex_init_values:
+                    # Standard DEX_CUSTOM calculation
                     calculated_dex_crc = calculate_crc16_dex_custom(current_data_bytes, dex_init)
-                    
                     match_type_dex = None
                     if calculated_dex_crc == target_crc_be: match_type_dex = "BE"
                     elif calculated_dex_crc == target_crc_le: match_type_dex = "LE"
 
                     if match_type_dex or show_all:
-                         print("{:<25} {:<12} {:<12} {:<25} 0x{:04x} {:<7} {:<7} {:<7} {:<7} 0x{:04x}   {:<8}".format(
-                            "DEX_CUSTOM", frame_label[:10], crc_loc_label[:10], data_label[:23], 
-                            dex_init, "N/A", "N/A", "N/A", "N/A", # Poly, Ref, XOR not directly applicable here
-                            calculated_dex_crc, match_type_dex if match_type_dex else ""
+                         print(header_format.format(
+                            "DEX_CUSTOM", frame_label[:10], crc_loc_label[:10], data_label[:21], 
+                            f"0x{dex_init:04x}", "N/A", "N/A", "N/A", "N/A", 
+                            f"0x{calculated_dex_crc:04x}", match_type_dex if match_type_dex else ""
                         ))
                     if match_type_dex:
-                         all_found_matches.append({"name": "DEX_CUSTOM", "init": dex_init, "frame_label":frame_label, "crc_loc_label": crc_loc_label, "data_label":data_label, "calculated_crc": calculated_dex_crc, "matched_target": match_type_dex})
+                         all_found_matches.append({"name": "DEX_CUSTOM", "init": dex_init, "frame_label":frame_label, "crc_loc_label": crc_loc_label, "data_label":data_label, "calculated_crc": calculated_dex_crc, "matched_target": match_type_dex, "final_xor_applied": 0x0000})
+                    
+                    # DEX_CUSTOM calculation with final XOR
+                    calculated_dex_crc_xored = calculated_dex_crc ^ final_xor_for_dex
+                    match_type_dex_xored = None
+                    if calculated_dex_crc_xored == target_crc_be: match_type_dex_xored = "BE"
+                    elif calculated_dex_crc_xored == target_crc_le: match_type_dex_xored = "LE"
 
+                    if match_type_dex_xored or show_all:
+                         print(header_format.format(
+                            "DEX_CUSTOM (XORed)", frame_label[:10], crc_loc_label[:10], data_label[:21], 
+                            f"0x{dex_init:04x}", "N/A", "N/A", "N/A", f"0x{final_xor_for_dex:04x}", 
+                            f"0x{calculated_dex_crc_xored:04x}", match_type_dex_xored if match_type_dex_xored else ""
+                        ))
+                    if match_type_dex_xored:
+                         all_found_matches.append({"name": "DEX_CUSTOM (XORed)", "init": dex_init, "frame_label":frame_label, "crc_loc_label": crc_loc_label, "data_label":data_label, "calculated_crc": calculated_dex_crc_xored, "matched_target": match_type_dex_xored, "final_xor_applied": final_xor_for_dex})
 
     if all_found_matches:
         print("\n=== MATCHING ALGORITHMS FOUND ===")
@@ -230,14 +244,16 @@ def analyze_frame_crc(full_frame_hex, show_all=False):
             print(f"  Frame Tested:     {match['frame_label']}")
             print(f"  CRC Location:     {match['crc_loc_label']}")
             print(f"  Data Processing:  {match['data_label']}")
-            if 'poly' in match: # For generic CRCs
-                print(f"  Poly (Normal):    0x{match.get('normal_poly', match.get('poly',0)):04x}") # normal_poly or poly_for_method
+            if match['name'] not in ["DEX_CUSTOM", "DEX_CUSTOM (XORed)"]:
+                print(f"  Poly (Normal):    0x{match.get('normal_poly', match.get('poly',0)):04x}")
                 print(f"  Initial Value:    0x{match['init']:04x}")
                 print(f"  Reflect Input:    {match['ref_in']}")
                 print(f"  Reflect Output:   {match['ref_out']}")
                 print(f"  XOR Output:       0x{match['xor_out']:04x}")
-            elif match['name'] == "DEX_CUSTOM": # For custom DEX
+            else: # For DEX_CUSTOM variants
                 print(f"  Initial Value:    0x{match['init']:04x}")
+                if match['name'] == "DEX_CUSTOM (XORed)":
+                    print(f"  Final XOR Applied:0x{match['final_xor_applied']:04x}")
             print(f"  Calculated CRC:   0x{match['calculated_crc']:04x}")
             print(f"  Matched Target:   {match['matched_target']}")
     else:
