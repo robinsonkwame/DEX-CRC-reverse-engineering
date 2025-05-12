@@ -1,6 +1,6 @@
 Frame analysis - length: 23, first byte: 10, second byte: 1, third-to-last: 3, second-to-last: 75, last byte: 9b
 
-[SYSTEM] Received first ENQ, attempting to send DLE+ACK0
+COM:"DLE+ACK0"
 [TX]  HEX: 10 30  ASCII: .0
-[SYSTEM] State transition to WAITING_FOR_ACK_RESPONSE (Waiting for VMC Comm ID / EOT)
-[RX]  HEX: 10 01 43 4e 56 20 20 20 44 45 33 32 53 52 30 31 4c 30 31 10 03 75 9b  ASCII: ..CNV   DE32SR01L01..u.
+HEX: "10 01 43 4e 56 20 20 20 44 45 33 32 53 52 30 31 4c 30 31 10 03 75 9b" 
+ASCII: "..CNV   DE32SR01L01..u."
