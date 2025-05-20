@@ -43,6 +43,13 @@ class SerialConnection:
             self.logger.error(f"Failed to connect to {port}: {str(e)}")
             return False
 
+    def reset_buffers(self) -> None:
+        """Reset input and output buffers."""
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.reset_input_buffer()
+            self.serial_port.reset_output_buffer()
+            self.logger.info("Reset input and output buffers")
+
     def disconnect(self) -> None:
         """Close the serial connection if it's open."""
         if self.serial_port and self.serial_port.is_open:
@@ -54,8 +61,11 @@ class SerialConnection:
         if not self.serial_port or not self.serial_port.is_open:
             return None
         try:
-            return self.serial_port.read(1)[0]
-        except (IndexError, serial.SerialException) as e:
+            data = self.serial_port.read(1)
+            if data:  # Check if we actually got data
+                return data[0]
+            return None  # Return None on timeout
+        except serial.SerialException as e:
             self.logger.error(f"Error reading from serial port: {str(e)}")
             return None
 
