@@ -201,10 +201,23 @@ def dex_second_handshake(serial_port, logger):
     # Prepare the message with communication ID and revision level
     message = DLE + SOH + VMD_CommunicationID + b'R' + VMD_RevisionLevel + DLE + ETX
 
+    # Load CRC config to check data processing setting
+    crc_config = load_crc_config('crc_config.yaml')
+    
+    # Process message bytes according to config
+    if crc_config.get('data_processing') == "Raw Data":
+        message_bytes = list(message)  # Use full message including DLE and SOH
+        logger.info("Using raw data for CRC calculation (including DLE and SOH bytes)")
+    else:
+        message_bytes = [b for b in message if b != DLE[0] and b != SOH[0]]
+        logger.info("Filtering out DLE and SOH bytes for CRC calculation")
+
     # Calculate CRC
-    message_bytes = [b for b in message]
     crc = calculate_crc(message_bytes)
     crc_bytes = crc.to_bytes(2, 'little')
+    
+    logger.info(f"Message bytes for CRC calculation: {[hex(b) for b in message_bytes]}")
+    logger.info(f"Calculated CRC: {crc:04x}")
 
     # Send the message with CRC
     full_message = message + crc_bytes
@@ -227,8 +240,17 @@ def dex_second_handshake(serial_port, logger):
         # Verify CRC of received data
         if len(response_data) >= 2:
             received_crc = int.from_bytes(response_data[-2:], byteorder='little')
-            message_bytes = [b for b in response_data[:-2] if b != DLE[0]]
+            
+            # Process received message bytes according to config
+            if crc_config.get('data_processing') == "Raw Data":
+                message_bytes = list(response_data[:-2])  # Use full message including DLE and SOH
+                logger.info("Using raw data for received message CRC calculation")
+            else:
+                message_bytes = [b for b in response_data[:-2] if b != DLE[0] and b != SOH[0]]
+                logger.info("Filtering out DLE and SOH bytes for received message CRC calculation")
+            
             calculated_crc = calculate_crc(message_bytes)
+            logger.info(f"Received message bytes for CRC calculation: {[hex(b) for b in message_bytes]}")
             
             if received_crc == calculated_crc:
                 logger.info("CRC verification successful")
@@ -380,7 +402,7 @@ def main():
     mock_port = MockSerialPort('logs/dex_session_20250519_115731.log')
     
     # Choose between real and mock serial port
-    use_mock = True  # Set to False to use real serial port
+    use_mock = False #True  # Set to False to use real serial port
     
     while True:
         try:
