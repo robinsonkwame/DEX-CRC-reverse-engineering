@@ -25,9 +25,14 @@ ETB = b'\x17'  # End of Transmission Block
 BAUDRATE = 9600  # Baudrate for serial communication
 DEXDELAY = 0.05  # Delay to handle timing issues
 
-# Communication ID and Revision Level
-VMD_CommunicationID = b''  # Vending Machine Device Communication ID
-VMD_RevisionLevel = b''  # Revision Level
+# DDC (Data Collection Device) - Your script's identifiers
+DDC_CommunicationID = b'DEXPYTHN'  # 8-character identifier for your script
+DDC_RevisionLevel = b'01'  # 2-character revision level
+
+# VMC (Vending Machine Controller) - Parsed from first handshake
+VMC_CommunicationID = b''  # Will be populated from first handshake
+VMC_RevisionLevel = b''  # Will be populated from first handshake
+VMC_LayerInfo = b''  # Will be populated from first handshake
 
 # Default values
 port = "/dev/cu.usbmodem5B43E73635381"
@@ -36,6 +41,38 @@ DEFAULT_COM_PORT = port
 def calculate_crc(data: List[int]) -> int:
     """Calculate CRC using parameters from config file."""
     return calculate_crc_with_config(data, 'crc_config.yaml')
+
+def parse_vmc_identity(message: bytearray) -> Tuple[bytes, bytes, bytes]:
+    """Parse VMC identity from the first handshake message.
+    
+    Expected format: DLE + SOH + CommID(8) + 'R' + RevLevel(2) + LayerInfo + DLE + ETX
+    Returns: (communication_id, revision_level, layer_info)
+    """
+    global VMC_CommunicationID, VMC_RevisionLevel, VMC_LayerInfo
+    
+    # Remove DLE + SOH from start and DLE + ETX from end
+    if len(message) >= 4 and message[0] == DLE[0] and message[1] == SOH[0]:
+        if message[-2:] == DLE + ETX:
+            content = message[2:-2]  # Remove framing
+            
+            # Find the 'R' marker
+            r_index = content.find(ord('R'))
+            if r_index > 0:
+                comm_id = bytes(content[:r_index])
+                remaining = content[r_index+1:]  # Skip the 'R'
+                
+                # Next 2 bytes should be revision level
+                if len(remaining) >= 2:
+                    rev_level = bytes(remaining[:2])
+                    layer_info = bytes(remaining[2:])  # Everything else is layer info
+                    
+                    VMC_CommunicationID = comm_id
+                    VMC_RevisionLevel = rev_level
+                    VMC_LayerInfo = layer_info
+                    
+                    return comm_id, rev_level, layer_info
+    
+    return b'', b'', b''
 
 def send_ack(serial_port, ack_type, logger):
     """Send an ACK (acknowledge) signal."""
@@ -135,10 +172,17 @@ def dex_first_handshake(serial_port, logger):
         logger.error("First Handshake Error: CRC mismatch")
         return False
     
-    logger.info("CRC check passed! Exiting program as we don't have more data to process.")
-    sys.exit(0)  # Exit with success code
+    logger.info("CRC check passed!")
+    
+    # Parse VMC identity from the message
+    comm_id, rev_level, layer_info = parse_vmc_identity(message)
+    logger.info(f"VMC Communication ID: '{comm_id.decode('ascii', errors='ignore')}'")
+    logger.info(f"VMC Revision Level: '{rev_level.decode('ascii', errors='ignore')}'")
+    logger.info(f"VMC Layer Info: '{layer_info.decode('ascii', errors='ignore')}'")
+    
+    #sys.exit(0)  # Exit with success code
 
-    # The code below won't execute, but keeping it for reference
+    # This part is unknown
     send_ack(serial_port, DLE + b'\x31', logger)
 
     if not wait_for_eot(serial_port, logger):
@@ -170,7 +214,12 @@ def setup_logging():
     return logging.getLogger(__name__)
 
 def read_serial_data(serial_port, timeout=5):
-    """Read data from serial port until timeout or complete message is received."""
+    """Read data from serial port until timeout or complete message is received.
+    
+    Returns: (data_with_crc, is_final_block)
+    - data_with_crc: The complete message including CRC
+    - is_final_block: True if ended with DLE+ETX, False if ended with DLE+ETB
+    """
     data = bytearray()
     start_time = time.time()
     
@@ -179,15 +228,94 @@ def read_serial_data(serial_port, timeout=5):
             byte = serial_port.read(1)
             data.append(byte[0])
             
-            # Check for end of message (DLE + ETX)
-            if len(data) >= 2 and data[-2:] == DLE + ETX:
-                # Read CRC bytes
-                crc_bytes = serial_port.read(2)
-                if len(crc_bytes) == 2:
-                    return data + crc_bytes
+            # Check for end of message (DLE + ETX or DLE + ETB)
+            if len(data) >= 2:
+                if data[-2:] == DLE + ETX:
+                    # Final block - read CRC and return
+                    crc_bytes = serial_port.read(2)
+                    if len(crc_bytes) == 2:
+                        return data + crc_bytes, True
+                elif data[-2:] == DLE + ETB:
+                    # More blocks to follow - read CRC and return
+                    crc_bytes = serial_port.read(2)
+                    if len(crc_bytes) == 2:
+                        return data + crc_bytes, False
         time.sleep(0.01)
     
-    return data
+    return data, True  # Assume final if timeout
+
+def handle_multi_block_transfer(serial_port, logger):
+    """Handle multi-block data transfer from VMC.
+    
+    Returns: List of all received data blocks (without CRC)
+    """
+    all_blocks = []
+    block_number = 0
+    expected_ack = ACK0  # Start with ACK0
+    crc_config = load_crc_config('crc_config.yaml')
+    
+    logger.info("Starting multi-block data transfer...")
+    
+    while True:
+        block_number += 1
+        logger.info(f"Reading block {block_number}...")
+        
+        # Read the next block
+        block_data, is_final_block = read_serial_data(serial_port)
+        
+        if not block_data:
+            logger.warning(f"No data received for block {block_number}")
+            break
+            
+        # Log block information
+        block_type = "FINAL" if is_final_block else "INTERMEDIATE"
+        ending = "DLE+ETX" if is_final_block else "DLE+ETB" 
+        logger.info(f"Block {block_number} ({block_type}): {len(block_data)} bytes, ending with {ending}")
+        logger.info(f"Block {block_number} data: {block_data.hex()}")
+        
+        # Verify CRC of received block
+        if len(block_data) >= 2:
+            received_crc = int.from_bytes(block_data[-2:], byteorder='little')
+            
+            # Process received message bytes according to config
+            if crc_config.get('data_processing') == "Raw Data":
+                message_bytes = list(block_data[:-2])  # Use full message including DLE and SOH
+                logger.info(f"Block {block_number}: Using raw data for CRC calculation")
+            else:
+                message_bytes = [b for b in block_data[:-2] if b != DLE[0] and b != SOH[0]]
+                logger.info(f"Block {block_number}: Filtering out DLE and SOH bytes for CRC calculation")
+            
+            calculated_crc = calculate_crc(message_bytes)
+            logger.info(f"Block {block_number}: Received CRC: {received_crc:04x}, Calculated CRC: {calculated_crc:04x}")
+            
+            if received_crc == calculated_crc:
+                logger.info(f"Block {block_number}: CRC verification successful")
+                
+                # Store the block data (without CRC)
+                all_blocks.append(block_data[:-2])
+                
+                # Send appropriate ACK
+                send_ack(serial_port, expected_ack, logger)
+                logger.info(f"Block {block_number}: Sent ACK {expected_ack.hex()}")
+                
+                # Alternate ACK for next block
+                expected_ack = ACK1 if expected_ack == ACK0 else ACK0
+                
+                # If this was the final block, we're done
+                if is_final_block:
+                    logger.info("Final block received. Multi-block transfer complete.")
+                    break
+                    
+            else:
+                logger.error(f"Block {block_number}: CRC verification failed. Received: {received_crc:04x}, Calculated: {calculated_crc:04x}")
+                # Send NAK or handle error appropriately
+                break
+        else:
+            logger.error(f"Block {block_number}: Insufficient data for CRC verification")
+            break
+    
+    logger.info(f"Multi-block transfer completed. Received {len(all_blocks)} blocks.")
+    return all_blocks
 
 def dex_second_handshake(serial_port, logger):
     """Perform the second handshake in the DEX protocol and read response data."""
@@ -198,8 +326,15 @@ def dex_second_handshake(serial_port, logger):
         logger.error("Second Handshake Error: ACK0 not received")
         return False
 
-    # Prepare the message with communication ID and revision level
-    message = DLE + SOH + VMD_CommunicationID + b'R' + VMD_RevisionLevel + DLE + ETX
+    # Prepare the message with DDC communication ID and revision level
+    logger.info(f"DDC Communication ID: '{DDC_CommunicationID.decode('ascii', errors='ignore')}'")
+    logger.info(f"DDC Revision Level: '{DDC_RevisionLevel.decode('ascii', errors='ignore')}'")
+    
+    message_content = DDC_CommunicationID + b'R' + DDC_RevisionLevel
+    message = DLE + SOH + message_content + DLE + ETX
+    
+    logger.info(f"DDC message content: '{message_content.decode('ascii', errors='ignore')}'")
+    logger.info(f"DDC message framed: {message.hex()}")
 
     # Load CRC config to check data processing setting
     crc_config = load_crc_config('crc_config.yaml')
@@ -207,64 +342,80 @@ def dex_second_handshake(serial_port, logger):
     # Process message bytes according to config
     if crc_config.get('data_processing') == "Raw Data":
         message_bytes = list(message)  # Use full message including DLE and SOH
-        logger.info("Using raw data for CRC calculation (including DLE and SOH bytes)")
+        logger.info("Using raw data for DDC message CRC calculation (including DLE and SOH bytes)")
     else:
         message_bytes = [b for b in message if b != DLE[0] and b != SOH[0]]
-        logger.info("Filtering out DLE and SOH bytes for CRC calculation")
+        logger.info("Filtering out DLE and SOH bytes for DDC message CRC calculation")
 
     # Calculate CRC
     crc = calculate_crc(message_bytes)
     crc_bytes = crc.to_bytes(2, 'little')
     
-    logger.info(f"Message bytes for CRC calculation: {[hex(b) for b in message_bytes]}")
-    logger.info(f"Calculated CRC: {crc:04x}")
+    logger.info(f"DDC Message bytes for CRC calculation: {[hex(b) for b in message_bytes]}")
+    logger.info(f"Calculated CRC: {crc:04x} (bytes: {crc_bytes.hex()})")
 
     # Send the message with CRC
     full_message = message + crc_bytes
     serial_port.write(full_message)
     serial_port.flush()
-    logger.info(f"Sent message: {full_message.hex()}")
+    logger.info(f"Sent DDC identity message: {full_message.hex()}")
 
     if not wait_for_ack(serial_port, DLE + b'\x31', logger):
-        logger.error("Second Handshake Error: ACK1 not received after sending communication ID and revision level")
+        logger.error("Second Handshake Error: ACK1 not received after sending DDC communication ID and revision level")
         return False
 
+    logger.info("DDC Identity accepted by VMC (DLE+ACK1 received!). Ready for data transfer.")
     time.sleep(DEXDELAY)
 
-    # Read response data
-    logger.info("Reading response data...")
-    response_data = read_serial_data(serial_port)
-    if response_data:
-        logger.info(f"Received response: {response_data.hex()}")
+    # Handle multi-block data transfer
+    logger.info("Starting data transfer phase...")
+    all_blocks = handle_multi_block_transfer(serial_port, logger)
+    
+    if all_blocks:
+        logger.info(f"Successfully received {len(all_blocks)} data blocks")
         
-        # Verify CRC of received data
-        if len(response_data) >= 2:
-            received_crc = int.from_bytes(response_data[-2:], byteorder='little')
+        # Combine all blocks into one data stream
+        combined_data = bytearray()
+        for i, block in enumerate(all_blocks):
+            logger.info(f"Block {i+1}: {len(block)} bytes")
+            combined_data.extend(block)
+        
+        logger.info(f"Total combined data: {len(combined_data)} bytes")
+        
+        # Try to decode and log the data content
+        try:
+            # Most DEX data is ASCII text
+            text_data = combined_data.decode('ascii', errors='ignore')
+            logger.info(f"DEX Data Content Preview (first 500 chars):")
+            logger.info(text_data[:500])
             
-            # Process received message bytes according to config
-            if crc_config.get('data_processing') == "Raw Data":
-                message_bytes = list(response_data[:-2])  # Use full message including DLE and SOH
-                logger.info("Using raw data for received message CRC calculation")
-            else:
-                message_bytes = [b for b in response_data[:-2] if b != DLE[0] and b != SOH[0]]
-                logger.info("Filtering out DLE and SOH bytes for received message CRC calculation")
+            # Save the raw data to a file for analysis
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            data_file = f'logs/dex_data_{timestamp}.bin'
+            with open(data_file, 'wb') as f:
+                f.write(combined_data)
+            logger.info(f"Raw DEX data saved to: {data_file}")
             
-            calculated_crc = calculate_crc(message_bytes)
-            logger.info(f"Received message bytes for CRC calculation: {[hex(b) for b in message_bytes]}")
+            # Save the text data to a file
+            text_file = f'logs/dex_data_{timestamp}.txt'
+            with open(text_file, 'w') as f:
+                f.write(text_data)
+            logger.info(f"Text DEX data saved to: {text_file}")
             
-            if received_crc == calculated_crc:
-                logger.info("CRC verification successful")
-            else:
-                logger.error(f"CRC verification failed. Received: {received_crc:04x}, Calculated: {calculated_crc:04x}")
+            # Parse the DEX data format
+            parsed_data = parse_dex_data(text_data, logger)
+            
+        except Exception as e:
+            logger.error(f"Error processing DEX data: {e}")
     else:
-        logger.warning("No response data received")
+        logger.warning("No data blocks received")
 
+    # Send EOT to complete the session
     serial_port.write(EOT)
     serial_port.flush()
-    logger.info("Sent EOT")
+    logger.info("Sent EOT to complete session")
 
     return True
-
 
 def send_data_line(serial_port, line, line_number, is_last_line):
     """Send a line of data from the EVADTS file."""
@@ -387,6 +538,74 @@ class MockSerialPort:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+def parse_dex_data(data_text: str, logger):
+    """Parse DEX data format and extract key information."""
+    logger.info("Parsing DEX data format...")
+    
+    lines = data_text.split('\n')
+    parsed_info = {
+        'header': {},
+        'sections': {},
+        'total_lines': len(lines)
+    }
+    
+    current_section = None
+    
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+            
+        # DEX lines typically start with a 2-character identifier
+        if len(line) >= 2:
+            line_id = line[:2]
+            data_part = line[2:] if len(line) > 2 else ''
+            
+            # Common DEX line identifiers
+            if line_id == 'DX':
+                parsed_info['header']['dex_version'] = data_part
+                logger.info(f"DEX Version: {data_part}")
+            elif line_id == 'ST':
+                parsed_info['header']['start_time'] = data_part
+                logger.info(f"Start Time: {data_part}")
+            elif line_id == 'EN':
+                parsed_info['header']['end_time'] = data_part
+                logger.info(f"End Time: {data_part}")
+            elif line_id == 'CB':
+                current_section = 'cashbox'
+                if current_section not in parsed_info['sections']:
+                    parsed_info['sections'][current_section] = []
+                parsed_info['sections'][current_section].append(line)
+            elif line_id == 'CA':
+                current_section = 'cash_audit'
+                if current_section not in parsed_info['sections']:
+                    parsed_info['sections'][current_section] = []
+                parsed_info['sections'][current_section].append(line)
+            elif line_id == 'VA':
+                current_section = 'vend_audit'
+                if current_section not in parsed_info['sections']:
+                    parsed_info['sections'][current_section] = []
+                parsed_info['sections'][current_section].append(line)
+            elif line_id == 'PA':
+                current_section = 'price_audit'
+                if current_section not in parsed_info['sections']:
+                    parsed_info['sections'][current_section] = []
+                parsed_info['sections'][current_section].append(line)
+            elif current_section:
+                # Continue adding to current section
+                parsed_info['sections'][current_section].append(line)
+    
+    # Log summary
+    logger.info(f"DEX Data Summary:")
+    logger.info(f"  Total lines: {parsed_info['total_lines']}")
+    logger.info(f"  Header info: {len(parsed_info['header'])} fields")
+    logger.info(f"  Sections found: {list(parsed_info['sections'].keys())}")
+    
+    for section, items in parsed_info['sections'].items():
+        logger.info(f"    {section}: {len(items)} entries")
+    
+    return parsed_info
 
 def main():
     """Main function to initialize the serial port and perform DEX/UCS operations."""
