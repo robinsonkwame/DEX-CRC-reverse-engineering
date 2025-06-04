@@ -26,8 +26,17 @@ BAUDRATE = 9600  # Baudrate for serial communication
 DEXDELAY = 0.05  # Delay to handle timing issues
 
 # DDC (Data Collection Device) - Your script's identifiers
-DDC_CommunicationID = b'DEXPYTHN'  # 8-character identifier for your script
+# Based on DEX UCS specification: Communication ID must be 10 digits from GS1
+DDC_CommunicationID = b'0000000001'  # 10-digit GS1 Communication ID format
 DDC_RevisionLevel = b'01'  # 2-character revision level
+
+# Alternative DDC identifiers to try if first attempt fails
+ALTERNATIVE_DDC_IDS = [
+    (b'EVAET001', b'01'),  # Common generic audit device ID
+    (b'AUDIT   ', b'01'),  # Generic audit with spaces
+    (b'DEX     ', b'01'),  # Simple DEX identifier with spaces
+    (b'TEST1234', b'01'),  # Test identifier
+]
 
 # VMC (Vending Machine Controller) - Parsed from first handshake
 VMC_CommunicationID = b''  # Will be populated from first handshake
@@ -111,15 +120,33 @@ def wait_for_eot(serial_port, logger):
     return False
 
 def wait_for_ack(serial_port, expected_ack, logger):
-    """Wait for an ACK (acknowledge) signal."""
+    """Wait for an ACK (acknowledge) signal and log all received bytes."""
     logger.info(f"Waiting for ACK {expected_ack.hex()}...")
     start_time = time.time()
+    received_data = bytearray()
+    
     while time.time() - start_time < 5:  # Wait for 5 seconds for ACK
-        if serial_port.in_waiting >= 2:
-            data = serial_port.read(2)
+        if serial_port.in_waiting > 0:
+            data = serial_port.read(serial_port.in_waiting)  # Read all available bytes
+            received_data.extend(data)
             logger.info(f"Received bytes: {data.hex()}")
-            if data == expected_ack:
-                return True
+            
+            # Check if we have the expected ACK
+            if len(received_data) >= len(expected_ack):
+                # Check if expected_ack exists anywhere in received_data
+                for i in range(len(received_data) - len(expected_ack) + 1):
+                    if received_data[i:i+len(expected_ack)] == expected_ack:
+                        logger.info(f"Found expected ACK {expected_ack.hex()} at position {i}")
+                        return True
+        time.sleep(0.01)
+    
+    # Log all received data if ACK not found
+    if received_data:
+        logger.warning(f"Expected ACK {expected_ack.hex()} not found. Total received data: {received_data.hex()}")
+        logger.warning(f"Received {len(received_data)} bytes: {[hex(b) for b in received_data]}")
+    else:
+        logger.warning(f"No data received while waiting for ACK {expected_ack.hex()}")
+    
     return False
 
 def dex_first_handshake(serial_port, logger):
@@ -326,44 +353,23 @@ def dex_second_handshake(serial_port, logger):
         logger.error("Second Handshake Error: ACK0 not received")
         return False
 
-    # Prepare the message with DDC communication ID and revision level
-    logger.info(f"DDC Communication ID: '{DDC_CommunicationID.decode('ascii', errors='ignore')}'")
-    logger.info(f"DDC Revision Level: '{DDC_RevisionLevel.decode('ascii', errors='ignore')}'")
+    # Based on DEX UCS specification research:
+    # - Communication ID must be 10-digit code from GS1
+    # - VMC is rejecting because we need proper format
+    logger.info("DEX UCS Protocol Requirements:")
+    logger.info("- Communication ID: 10-digit code from GS1")
+    logger.info("- DUNS number: 9-digit code from Dun & Bradstreet")
+    logger.info("- VMC expects valid registered Communication ID")
     
-    message_content = DDC_CommunicationID + b'R' + DDC_RevisionLevel
-    message = DLE + SOH + message_content + DLE + ETX
+    # Try different valid DDC Communication ID formats
+    success, accepted_format = try_different_ddc_formats(serial_port, logger)
     
-    logger.info(f"DDC message content: '{message_content.decode('ascii', errors='ignore')}'")
-    logger.info(f"DDC message framed: {message.hex()}")
-
-    # Load CRC config to check data processing setting
-    crc_config = load_crc_config('crc_config.yaml')
-    
-    # Process message bytes according to config
-    if crc_config.get('data_processing') == "Raw Data":
-        message_bytes = list(message)  # Use full message including DLE and SOH
-        logger.info("Using raw data for DDC message CRC calculation (including DLE and SOH bytes)")
-    else:
-        message_bytes = [b for b in message if b != DLE[0] and b != SOH[0]]
-        logger.info("Filtering out DLE and SOH bytes for DDC message CRC calculation")
-
-    # Calculate CRC
-    crc = calculate_crc(message_bytes)
-    crc_bytes = crc.to_bytes(2, 'little')
-    
-    logger.info(f"DDC Message bytes for CRC calculation: {[hex(b) for b in message_bytes]}")
-    logger.info(f"Calculated CRC: {crc:04x} (bytes: {crc_bytes.hex()})")
-
-    # Send the message with CRC
-    full_message = message + crc_bytes
-    serial_port.write(full_message)
-    serial_port.flush()
-    logger.info(f"Sent DDC identity message: {full_message.hex()}")
-
-    if not wait_for_ack(serial_port, DLE + b'\x31', logger):
-        logger.error("Second Handshake Error: ACK1 not received after sending DDC communication ID and revision level")
+    if not success:
+        logger.error("Second Handshake Error: No valid DDC identity format accepted by VMC")
+        logger.error("VMC may require a pre-registered GS1 Communication ID")
         return False
 
+    logger.info(f"DDC Identity accepted! Format: '{accepted_format.decode('ascii', errors='ignore')}'")
     logger.info("DDC Identity accepted by VMC (DLE+ACK1 received!). Ready for data transfer.")
     time.sleep(DEXDELAY)
 
@@ -606,6 +612,77 @@ def parse_dex_data(data_text: str, logger):
         logger.info(f"    {section}: {len(items)} entries")
     
     return parsed_info
+
+def try_different_ddc_formats(serial_port, logger):
+    """Try different DDC identity formats based on DEX UCS specification."""
+    
+    # DEX UCS requires 10-digit Communication IDs from GS1
+    formats_to_try = [
+        # Format 1: Simple 10-digit numeric IDs (standard DEX format)
+        (b'0000000001', b'01', "10-digit format: 0000000001"),
+        (b'1234567890', b'01', "10-digit format: 1234567890"),
+        (b'9999999999', b'01', "10-digit format: 9999999999"),
+        
+        # Format 2: Try echoing VMC's format but as 10 digits  
+        (b'0000000000', b'01', "10-digit zeros"),
+        
+        # Format 3: Common test/generic IDs used in DEX testing
+        (b'0000000999', b'01', "Test ID: 0000000999"),
+        (b'1111111111', b'01', "Test ID: 1111111111"),
+        
+        # Format 4: Try empty/minimal (though spec says 10 digits required)
+        (b'', b'', "Empty identity (spec non-compliant but test)"),
+        
+        # Format 5: Try the VMC's actual format padded to 10 digits
+        (VMC_CommunicationID + b'00', VMC_RevisionLevel, "VMC ID padded to 10 digits"),
+    ]
+    
+    for attempt, (comm_id, rev_level, description) in enumerate(formats_to_try):
+        logger.info(f"ATTEMPT {attempt + 1}: Trying {description}")
+        logger.info(f"Communication ID: '{comm_id.decode('ascii', errors='ignore')}'")
+        logger.info(f"Revision Level: '{rev_level.decode('ascii', errors='ignore')}'")
+        
+        # Build message content according to DEX UCS spec
+        if len(comm_id) == 0:
+            message_content = b'R'  # Just the request character
+        else:
+            message_content = comm_id + b'R' + rev_level
+            
+        message = DLE + SOH + message_content + DLE + ETX
+        
+        logger.info(f"Message content: '{message_content.decode('ascii', errors='ignore')}'")
+        logger.info(f"Message framed: {message.hex()}")
+        
+        # Calculate CRC
+        crc_config = load_crc_config('crc_config.yaml')
+        if crc_config.get('data_processing') == "Raw Data":
+            message_bytes = list(message)
+        else:
+            message_bytes = [b for b in message if b != DLE[0] and b != SOH[0]]
+            
+        crc = calculate_crc(message_bytes)
+        crc_bytes = crc.to_bytes(2, 'little')
+        
+        logger.info(f"Calculated CRC: {crc:04x} (bytes: {crc_bytes.hex()})")
+        
+        # Send the message
+        full_message = message + crc_bytes
+        serial_port.write(full_message)
+        serial_port.flush()
+        logger.info(f"Sent message: {full_message.hex()}")
+        
+        # Wait for response
+        if wait_for_ack(serial_port, DLE + b'\x31', logger):
+            logger.info(f"SUCCESS! Format '{description}' was accepted by VMC!")
+            return True, message_content
+        else:
+            logger.warning(f"Format '{description}' was rejected by VMC")
+            
+        # Small delay between attempts
+        time.sleep(1)
+    
+    logger.error("All DDC identity formats were rejected by VMC")
+    return False, b''
 
 def main():
     """Main function to initialize the serial port and perform DEX/UCS operations."""
