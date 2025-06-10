@@ -1,3 +1,139 @@
+import serial
+import time
+import logging
+import os
+from datetime import datetime
+from typing import List, Optional, Tuple, Union
+import io
+import yaml
+from dataclasses import dataclass
+from enum import Enum
+
+# Constants for DEX/UCS protocol
+class DEXConstants:
+    ENQ = 0x05  # Enquiry signal
+    EOT = 0x04  # End of Transmission
+    DLE = 0x10  # Data Link Escape
+    ACK0 = 0x30  # Acknowledge 0
+    ACK1 = 0x31  # Acknowledge 1
+    NAK = 0x15  # Negative Acknowledge
+    SOH = 0x01  # Start of Header
+    STX = 0x02  # Start of Text
+    ETX = 0x03  # End of Text
+    ETB = 0x17  # End of Transmission Block
+    
+    # Timeouts
+    HANDSHAKE_TIMEOUT = 5
+    DATA_TIMEOUT = 10
+
+class DEXState(Enum):
+    IDLE = 0
+    MASTER_HANDSHAKE = 1
+    SLAVE_HANDSHAKE = 2
+    DATA_TRANSFER = 3
+    COMPLETE = 4
+    ERROR = 5
+
+@dataclass
+class DEXMessage:
+    data: bytes
+    is_valid: bool
+    is_final: bool
+    crc: int = 0
+
+class DEXFraming:
+    @staticmethod
+    def parse_frame(frame: bytes, crc_calc) -> DEXMessage:
+        """Parse a DEX frame and validate its CRC."""
+        if len(frame) < 4:  # Minimum frame size: DLE+SOH + data + DLE+ETX + CRC
+            return DEXMessage(data=b'', is_valid=False, is_final=False)
+        
+        # Check frame boundaries
+        if frame[0] != DEXConstants.DLE or frame[1] != DEXConstants.SOH:
+            return DEXMessage(data=b'', is_valid=False, is_final=False)
+        
+        # Find the end of the frame
+        end_idx = -1
+        for i in range(2, len(frame)-1):
+            if frame[i] == DEXConstants.DLE and frame[i+1] in [DEXConstants.ETX, DEXConstants.ETB]:
+                end_idx = i
+                break
+        
+        if end_idx == -1:
+            return DEXMessage(data=b'', is_valid=False, is_final=False)
+        
+        # Extract data and check if it's final
+        data = frame[2:end_idx]
+        is_final = frame[end_idx+1] == DEXConstants.ETX
+        
+        # Extract and validate CRC
+        if len(frame) < end_idx + 4:  # Need 2 more bytes for CRC
+            return DEXMessage(data=data, is_valid=False, is_final=is_final)
+        
+        received_crc = int.from_bytes(frame[end_idx+2:end_idx+4], byteorder='little')
+        
+        # Calculate CRC on data plus ETX/ETB
+        crc_data = bytearray(data)
+        crc_data.append(frame[end_idx+1])  # Add ETX/ETB
+        calculated_crc = crc_calc.calculate(crc_data)
+        
+        return DEXMessage(
+            data=data,
+            is_valid=received_crc == calculated_crc,
+            is_final=is_final,
+            crc=received_crc
+        )
+
+class CRCCalculator:
+    def __init__(self, config_path='crc_config.yaml'):
+        self.config = self._load_config(config_path)
+        self.polynomial = self.config.get('polynomial', 0x1021)
+        self.initial_value = self.config.get('initial_value', 0xFFFF)
+        self.final_xor = self.config.get('final_xor', 0x0000)
+        self.reflect_input = self.config.get('reflect_input', True)
+        self.reflect_output = self.config.get('reflect_output', True)
+    
+    def _load_config(self, config_path):
+        """Load CRC configuration from YAML file."""
+        try:
+            with open(config_path, 'r') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            logging.warning(f"Failed to load CRC config: {e}")
+            return {}
+    
+    def _reflect(self, value, bits):
+        """Reflect the bits in a value."""
+        reflected = 0
+        for i in range(bits):
+            if value & (1 << i):
+                reflected |= (1 << (bits - 1 - i))
+        return reflected
+    
+    def calculate(self, data: List[int]) -> int:
+        """Calculate CRC-16 using the configured parameters."""
+        crc = self.initial_value
+        
+        for byte in data:
+            if self.reflect_input:
+                byte = self._reflect(byte, 8)
+            
+            crc ^= (byte << 8)
+            for _ in range(8):
+                if crc & 0x8000:
+                    crc = ((crc << 1) ^ self.polynomial) & 0xFFFF
+                else:
+                    crc = (crc << 1) & 0xFFFF
+        
+        if self.reflect_output:
+            crc = self._reflect(crc, 16)
+        
+        return crc ^ self.final_xor
+
+class DEXProtocolError(Exception):
+    """Custom exception for DEX protocol errors."""
+    pass
+
 def perform_slave_handshake(self) -> dict:
     """Perform Second Handshake phase (where we act as slave)"""
     logger.info("Starting Second Handshake - waiting for machine ENQ")

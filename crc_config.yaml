@@ -1,9 +1,7 @@
-crc:
-  # Parameters for DEX_CUSTOM with XOR that matched in the analysis
-  algorithm: "DEX_CUSTOM"  # Use the DEX custom algorithm
-  init: 0x0000  # Initial value from match
-  xor_out: 0x0d4d  # Final XOR value from match
-  # Metadata for reference
-  data_processing: "Raw Data"  # How data is processed
-  crc_location: "CRC at End"  # Where CRC is located
-  endianness: "LE"  # Little-endian format
+# CRC-16 Configuration
+polynomial: 0x1021  # Standard CRC-16-CCITT polynomial
+initial_value: 0xFFFF  # Initial value
+final_xor: 0x0000  # Final XOR value
+reflect_input: true  # Reflect input bytes
+reflect_output: true  # Reflect output CRC
+data_processing: "Raw Data"  # Process raw data including DLE and SOH bytes
