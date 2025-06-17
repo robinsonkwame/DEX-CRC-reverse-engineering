@@ -700,39 +700,71 @@ def main():
     # Choose between real and mock serial port
     use_mock = False #True  # Set to False to use real serial port
     
-    while True:
+    serial_port = None
+    
+    try:
+        # Step 1: Initialize serial port
+        logger.info("STEP 1: Initializing serial port...")
+        if use_mock:
+            serial_port = mock_port
+            logger.info("Using mock serial port")
+        else:
+            serial_port = serial.Serial(com_port, baudrate=BAUDRATE, timeout=1, 
+                                        bytesize=serial.EIGHTBITS, 
+                                        parity=serial.PARITY_NONE, 
+                                        stopbits=serial.STOPBITS_ONE)
+            logger.info("Real serial port initialized successfully")
+        
+        # Step 2: Clear buffers
+        logger.info("STEP 2: Clearing serial buffers...")
+        serial_port.reset_input_buffer()  # Clear the input buffer
+        serial_port.reset_output_buffer()  # Clear the output buffer
+        time.sleep(2)  # Allow time for the serial port to initialize
+        logger.info("Serial buffers cleared successfully")
+
+        # Step 3: First handshake
+        logger.info("STEP 3: Starting first handshake...")
         try:
-            if use_mock:
-                serial_port = mock_port
-            else:
-                serial_port = serial.Serial(com_port, baudrate=BAUDRATE, timeout=1, 
-                                          bytesize=serial.EIGHTBITS, 
-                                          parity=serial.PARITY_NONE, 
-                                          stopbits=serial.STOPBITS_ONE)
-            
-            serial_port.reset_input_buffer()  # Clear the input buffer
-            serial_port.reset_output_buffer()  # Clear the output buffer
-            time.sleep(2)  # Allow time for the serial port to initialize
-
             if dex_first_handshake(serial_port, logger):
-                logger.info("First handshake successful")
-
-                if dex_second_handshake(serial_port, logger):
-                    logger.info("Second handshake successful")
-                    logger.info("File transfer completed")
-                else:
-                    logger.error("Second handshake failed")
-            else:
-                logger.error("First handshake failed")
-
-            logger.info("Restarting the process...")
-            
-            if not use_mock:
-                serial_port.close()
+                logger.info("STEP 3 SUCCESS: First handshake completed successfully")
                 
+                # Step 4: Second handshake
+                logger.info("STEP 4: Starting second handshake...")
+                try:
+                    if dex_second_handshake(serial_port, logger):
+                        logger.info("STEP 4 SUCCESS: Second handshake completed successfully")
+                        logger.info("SESSION COMPLETE: File transfer completed successfully")
+                    else:
+                        logger.error("STEP 4 FAILED: Second handshake failed")
+                except Exception as e:
+                    logger.error(f"STEP 4 ERROR: Exception during second handshake: {str(e)}")
+                    logger.error(f"Exception type: {type(e).__name__}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+            else:
+                logger.error("STEP 3 FAILED: First handshake failed")
         except Exception as e:
-            logger.error(f"Error during DEX session: {str(e)}")
-            time.sleep(5)  # Wait before retrying
+            logger.error(f"STEP 3 ERROR: Exception during first handshake: {str(e)}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+        logger.info("CLEANUP: Restarting the process...")
+        
+    except Exception as e:
+        logger.error(f"INITIALIZATION ERROR: Error during serial port setup: {str(e)}")
+        logger.error(f"Exception type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    finally:
+        # Step 5: Cleanup
+        logger.info("STEP 5: Cleanup...")
+        try:
+            if serial_port and not use_mock:
+                serial_port.close()
+                logger.info("Serial port closed successfully")
+        except Exception as e:
+            logger.error(f"CLEANUP ERROR: Error closing serial port: {str(e)}")
 
 if __name__ == "__main__":
     main()
