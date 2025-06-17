@@ -1,7 +1,9 @@
 import serial
 import time
 import logging
-from crc_calculator import CrcCalculator, Crc16
+from typing import List
+from crc_calculator import calculate_crc_with_config, load_crc_config
+
 
 # --- Constants for DEX/UCS Protocol ---
 # These control characters govern the communication flow.
@@ -42,6 +44,10 @@ logging.basicConfig(
     ]
 )
 
+def calculate_crc(data: List[int]) -> int:
+    """Calculate CRC using parameters from config file."""
+    return calculate_crc_with_config(data, 'crc_config.yaml')
+
 class DEXSession:
     """
     Manages a DEX/UCS communication session with a vending machine.
@@ -63,8 +69,9 @@ class DEXSession:
         self.vmd_comm_id = None # Vending Machine Device Comm ID
         self.dc_comm_id = "PYDTS12345" # Data Collector (our) Comm ID
 
-        # CRC calculator setup for CRC-16/ARC
-        self.crc_calculator = CrcCalculator(Crc16.ARC)
+        # Load CRC configuration
+        self.crc_config = load_crc_config('crc_config.yaml')
+        
         logging.info(f"DEXSession initialized for port {port} at {baudrate} baud.")
 
     def _send(self, data: bytes):
@@ -100,7 +107,9 @@ class DEXSession:
         Sends a control frame (like a handshake) with DLE/STX framing and CRC.
         The data inside is NOT DLE-stuffed as it's a control frame.
         """
-        crc_val = self.crc_calculator.calculate_checksum(data)
+        # Convert bytes to list of integers for CRC calculation
+        data_list = list(data)
+        crc_val = calculate_crc(data_list)
         crc_bytes = crc_val.to_bytes(2, byteorder='little') # LSB first
         
         frame = DLE + STX + data + DLE + ETX + crc_bytes
@@ -157,7 +166,16 @@ class DEXSession:
             return None, False
         
         received_crc = int.from_bytes(received_crc_bytes, 'little')
-        calculated_crc = self.crc_calculator.calculate_checksum(unstuffed_data)
+        
+        # Process message bytes according to config (same approach as dex_session.py)
+        if self.crc_config.get('data_processing') == "Raw Data":
+            message_bytes = list(unstuffed_data)  # Use full message including DLE and SOH
+            logging.info("Using raw data for CRC calculation (including DLE and SOH bytes)")
+        else:
+            message_bytes = [b for b in unstuffed_data if b != DLE[0] and b != 0x01]  # Filter out DLE and SOH
+            logging.info("Filtering out DLE and SOH bytes for CRC calculation")
+            
+        calculated_crc = calculate_crc(message_bytes)
 
         logging.info(f"Unstuffed Data: {repr(unstuffed_data.decode('ascii', 'ignore'))}")
         logging.info(f"Received CRC: {received_crc:04X}, Calculated CRC: {calculated_crc:04X}")
